@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leaf disease severity</title>
+<style>
+  :root { --bg:#f7f8f4; --fg:#1d231c; --muted:#5e675c; --card:#fff; --line:#dde2d8; --accent:#3d7a33; --lesion:#d4269f; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#121510; --fg:#e5ebe2; --muted:#9aa595; --card:#1a1e18; --line:#2b3228; --accent:#7cc06e; --lesion:#f065c4; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:1040px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.6rem; margin:0 0 4px; } .lead { color:var(--muted); margin:0 0 18px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  .btn { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 14px; font:inherit; cursor:pointer; }
+  .btn.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  label.file { cursor:pointer; }
+  input[type=file] { display:none; }
+  .canvases { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; margin-top:14px; }
+  figure { margin:0; } figcaption { color:var(--muted); font-size:13px; margin-top:4px; }
+  canvas { width:100%; height:auto; border-radius:8px; background:var(--line); display:block; }
+  .stats { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:10px; margin-top:14px; }
+  .stat { border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .stat b { display:block; font-size:1.4rem; font-variant-numeric: tabular-nums; }
+  .stat span { color:var(--muted); font-size:13px; }
+  .stat.hl b { color:var(--lesion); }
+  input[type=range] { width:160px; }
+  .muted { color:var(--muted); font-size:13px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Leaf disease severity</h1>
+  <p class="lead">Segments the leaf with the excess-green index and Otsu's threshold, finds necrotic lesions by their CIELAB colour, and reports severity as lesion area / leaf area. This is a JavaScript port of the Python pipeline in <a href="https://github.com/liuweisu/plant-cell-image-analysis">plant-cell-image-analysis</a>; your photo never leaves the browser.</p>
+
+  <section class="card">
+    <div class="row">
+      <label class="btn file">Upload a leaf photo<input type="file" id="file" accept="image/*"></label>
+      <button class="btn ghost" data-sample="samples/leaf_paper.png">Sample: paper</button>
+      <button class="btn ghost" data-sample="samples/leaf_bench.png">Sample: bench</button>
+      <button class="btn ghost" data-sample="samples/leaf_soil.png">Sample: soil</button>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label class="muted">Lesion threshold (a*) <input type="range" id="astar" min="-15" max="15" step="1" value="-2"> <span id="astar-val">-2</span></label>
+      <label class="muted"><input type="checkbox" id="recover" checked> recover lesions on the leaf margin</label>
+    </div>
+    <p class="muted">Works best with one or a few leaves on a plain, non-green, non-brown background. Large photos are scaled to 600 px.</p>
+    <div class="canvases">
+      <figure><canvas id="c-in"></canvas><figcaption>Input</figcaption></figure>
+      <figure><canvas id="c-exg"></canvas><figcaption>Excess green index (brighter = greener)</figcaption></figure>
+      <figure><canvas id="c-out"></canvas><figcaption>Leaf outline (white) and lesions (magenta)</figcaption></figure>
+    </div>
+    <div class="stats" id="stats"></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null;  // ImageData of the input
+
+// ---------- colour ----------
+function srgbToLinear(c) { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+const LIN = new Float32Array(256).map((_, i) => srgbToLinear(i));
+function labOf(r, g, b) {
+  const R = LIN[r], G = LIN[g], B = LIN[b];
+  let x = (0.4124 * R + 0.3576 * G + 0.1805 * B) / 0.95047;
+  let y = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+  let z = (0.0193 * R + 0.1192 * G + 0.9505 * B) / 1.08883;
+  const f = (t) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+  x = f(x); y = f(y); z = f(z);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+
+// ---------- binary morphology via chamfer distance ----------
+function distanceTo(mask, w, h, target) {  // distance of each pixel to the nearest pixel where mask == target
+  const INF = 1e9, d = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) d[i] = mask[i] === target ? 0 : INF;
+  const a = 1, b = Math.SQRT2;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x; let v = d[i];
+    if (x > 0) v = Math.min(v, d[i - 1] + a);
+    if (y > 0) { v = Math.min(v, d[i - w] + a); if (x > 0) v = Math.min(v, d[i - w - 1] + b); if (x < w - 1) v = Math.min(v, d[i - w + 1] + b); }
+    d[i] = v;
+  }
+  for (let y = h - 1; y >= 0; y--) for (let x = w - 1; x >= 0; x--) {
+    const i = y * w + x; let v = d[i];
+    if (x < w - 1) v = Math.min(v, d[i + 1] + a);
+    if (y < h - 1) { v = Math.min(v, d[i + w] + a); if (x < w - 1) v = Math.min(v, d[i + w + 1] + b); if (x > 0) v = Math.min(v, d[i + w - 1] + b); }
+    d[i] = v;
+  }
+  return d;
+}
+const dilate = (m, w, h, r) => { const d = distanceTo(m, w, h, 1); return Uint8Array.from(d, (v) => v <= r ? 1 : 0); };
+const erode = (m, w, h, r) => { const d = distanceTo(m, w, h, 0); return Uint8Array.from(d, (v) => v > r ? 1 : 0); };
+const open_ = (m, w, h, r) => dilate(erode(m, w, h, r), w, h, r);
+const close_ = (m, w, h, r) => erode(dilate(m, w, h, r), w, h, r);
+
+function fillHoles(m, w, h) {  // background reachable from the border stays background
+  const out = new Uint8Array(w * h).fill(1), stack = [];
+  const push = (i) => { if (!m[i] && out[i]) { out[i] = 0; stack.push(i); } };
+  for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+  while (stack.length) {
+    const i = stack.pop(), x = i % w;
+    if (x > 0) push(i - 1); if (x < w - 1) push(i + 1); if (i >= w) push(i - w); if (i < w * (h - 1)) push(i + w);
+  }
+  return out;
+}
+
+function components(m, w, h, minSize) {  // returns {labels, sizes} after dropping small components
+  const labels = new Int32Array(w * h), sizes = [0]; let n = 0;
+  for (let s = 0; s < w * h; s++) {
+    if (!m[s] || labels[s]) continue;
+    n++; let size = 0; const stack = [s]; labels[s] = n;
+    while (stack.length) {
+      const i = stack.pop(), x = i % w; size++;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) {
+        if (j >= 0 && j < w * h && m[j] && !labels[j]) { labels[j] = n; stack.push(j); }
+      }
+    }
+    sizes.push(size);
+  }
+  const keep = sizes.map((s) => s >= minSize);
+  let kept = 0; const remap = sizes.map((_, k) => (k && keep[k]) ? ++kept : 0);
+  for (let i = 0; i < w * h; i++) labels[i] = remap[labels[i]];
+  return { labels, count: kept };
+}
+
+function otsu(values) {
+  let lo = Infinity, hi = -Infinity;
+  for (const v of values) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const bins = 256, hist = new Float64Array(bins), scale = (bins - 1) / (hi - lo || 1);
+  for (const v of values) hist[Math.round((v - lo) * scale)]++;
+  const total = values.length; let sum = 0; for (let i = 0; i < bins; i++) sum += i * hist[i];
+  let sumB = 0, wB = 0, best = 0, t = 0;
+  for (let i = 0; i < bins; i++) {
+    wB += hist[i]; if (!wB) continue; const wF = total - wB; if (!wF) break;
+    sumB += i * hist[i]; const mB = sumB / wB, mF = (sum - sumB) / wF, between = wB * wF * (mB - mF) ** 2;
+    if (between > best) { best = between; t = i; }
+  }
+  return lo + t / scale;
+}
+
+// ---------- pipeline ----------
+function analyse() {
+  if (!current) return;
+  const { width: w, height: h, data } = current, N = w * h;
+  const exg = new Float32Array(N), lab = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const r = data[4 * i], g = data[4 * i + 1], b = data[4 * i + 2], s = r + g + b + 1e-6;
+    exg[i] = (2 * g - r - b) / s;
+    lab[i] = labOf(r, g, b);
+  }
+  const t = otsu(exg);
+  const minSize = Math.max(50, Math.round(N * 0.005));
+  let green = open_(Uint8Array.from(exg, (v) => v > t ? 1 : 0), w, h, 1);
+  const cc = components(green, w, h, minSize);
+  green = Uint8Array.from(cc.labels, (v) => v ? 1 : 0);
+  let leaf = fillHoles(green, w, h);
+
+  if ($("recover").checked) {
+    // closing recovers lesions on the margin; keep only pixels that differ from the background colour
+    const border = [];
+    for (let x = 0; x < w; x++) for (const y of [0, 1, 2, h - 3, h - 2, h - 1]) border.push(lab[y * w + x]);
+    for (let y = 0; y < h; y++) for (const x of [0, 1, 2, w - 3, w - 2, w - 1]) border.push(lab[y * w + x]);
+    const med = [0, 1, 2].map((k) => border.map((p) => p[k]).sort((a, b) => a - b)[border.length >> 1]);
+    const closed = fillHoles(close_(leaf, w, h, Math.max(3, Math.round(0.1 * Math.min(w, h)))), w, h);
+    for (let i = 0; i < N; i++) {
+      if (closed[i] && !leaf[i]) {
+        const p = lab[i], de = Math.hypot(p[0] - med[0], p[1] - med[1], p[2] - med[2]);
+        if (de > 20) leaf[i] = 1;
+      }
+    }
+    leaf = fillHoles(open_(leaf, w, h, 1), w, h);
+  }
+  const leaves = components(leaf, w, h, minSize);
+  leaf = Uint8Array.from(leaves.labels, (v) => v ? 1 : 0);
+
+  const thr = +$("astar").value;
+  let lesion = new Uint8Array(N);
+  for (let i = 0; i < N; i++) lesion[i] = leaf[i] && lab[i][1] > thr ? 1 : 0;
+  lesion = open_(lesion, w, h, 1);
+  const les = components(lesion, w, h, 10);
+  lesion = Uint8Array.from(les.labels, (v) => v ? 1 : 0);
+
+  // draw
+  const exgCanvas = $("c-exg"), outCanvas = $("c-out");
+  for (const c of [exgCanvas, outCanvas]) { c.width = w; c.height = h; }
+  const exgImg = new ImageData(w, h), outImg = new ImageData(new Uint8ClampedArray(data), w, h);
+  let lo = Infinity, hi = -Infinity; for (const v of exg) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const edge = erode(leaf, w, h, 1);
+  let leafArea = 0, lesionArea = 0;
+  for (let i = 0; i < N; i++) {
+    const v = Math.round(255 * (exg[i] - lo) / (hi - lo || 1));
+    exgImg.data.set([v, v, v, 255], 4 * i);
+    if (leaf[i]) leafArea++;
+    if (lesion[i]) { lesionArea++; for (const [k, c] of [[0, 212], [1, 38], [2, 159]]) outImg.data[4 * i + k] = 0.45 * outImg.data[4 * i + k] + 0.55 * c; }
+    if (leaf[i] && !edge[i]) outImg.data.set([255, 255, 255, 255], 4 * i);
+  }
+  exgCanvas.getContext("2d").putImageData(exgImg, 0, 0);
+  outCanvas.getContext("2d").putImageData(outImg, 0, 0);
+
+  const sev = leafArea ? 100 * lesionArea / leafArea : 0;
+  $("stats").innerHTML = [
+    ["hl", sev.toFixed(1) + " %", "disease severity"],
+    ["", leaves.count, leaves.count === 1 ? "leaf" : "leaves"],
+    ["", les.count, "lesions"],
+    ["", leafArea.toLocaleString() + " px", "leaf area"],
+    ["", lesionArea.toLocaleString() + " px", "lesion area"],
+    ["", t.toFixed(3), "Otsu threshold on ExG"],
+  ].map(([cls, v, l]) => `<div class="stat ${cls}"><b>${v}</b><span>${l}</span></div>`).join("");
+}
+
+function load(src) {
+  const img = new Image();
+  img.onload = () => {
+    const scale = Math.min(1, 600 / Math.max(img.width, img.height));
+    const c = $("c-in"); c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+    const ctx = c.getContext("2d"); ctx.drawImage(img, 0, 0, c.width, c.height);
+    current = ctx.getImageData(0, 0, c.width, c.height);
+    analyse();
+  };
+  img.src = src;
+}
+
+$("file").onchange = (e) => { const f = e.target.files[0]; if (f) load(URL.createObjectURL(f)); };
+document.querySelectorAll("[data-sample]").forEach((b) => b.onclick = () => load(b.dataset.sample));
+$("astar").oninput = () => { $("astar-val").textContent = $("astar").value; analyse(); };
+$("recover").onchange = analyse;
+load("samples/leaf_paper.png");
+</script>
+</body>
+</html>
