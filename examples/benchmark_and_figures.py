@@ -25,7 +25,7 @@ def label(img: np.ndarray, text: str) -> np.ndarray:
 
 
 def leaf_benchmark(n: int = 30) -> None:
-    print("## Leaves: segmentation and disease severity (synthetic, n=%d per background)\n" % n)
+    print(f"## Leaves: segmentation and disease severity (synthetic, n={n} per background)\n")
     print("| background | leaf IoU | lesion IoU | severity error (mean abs, % points) | without margin-lesion recovery |")
     print("| --- | --- | --- | --- | --- |")
     for bg in ("paper", "bench", "soil"):
