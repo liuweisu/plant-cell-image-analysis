@@ -3,6 +3,8 @@
 [![CI](https://github.com/liuweisu/plant-cell-image-analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/liuweisu/plant-cell-image-analysis/actions/workflows/ci.yml)
 **[Try it on your own leaf photo](https://liuweisu.github.io/plant-cell-image-analysis/)**
 
+> **About this repository.** This is a showcase of work I did during my studies at Wageningen University & Research (WUR). The original research and course code lives on WUR's internal GitLab and is not public. The code here was rebuilt quickly with help from Claude, an AI assistant, to show the methods and results; it is not the original thesis or course code.
+
 Classical image analysis for two everyday lab tasks:
 
 - **Plant phenotyping:** segment leaves in photos, measure their shape, and score disease severity (the percentage of leaf area covered by lesions).
